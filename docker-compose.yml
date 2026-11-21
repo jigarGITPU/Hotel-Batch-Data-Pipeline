@@ -1,0 +1,134 @@
+version: '3.8'
+
+services:
+  # ----------------------------------------------------------------------------
+  # Central PostgreSQL Analytics Warehouse & Airflow Metadata
+  # ----------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: hotel_postgres
+    environment:
+      POSTGRES_USER: ${DB_USER:-hotel_admin}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-hotel_secure_pwd_2026}
+      POSTGRES_DB: ${DB_NAME:-hotel_dw}
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./sql/01_create_schemas.sql:/docker-entrypoint-initdb.d/01_create_schemas.sql:ro
+      - ./sql/02_create_staging.sql:/docker-entrypoint-initdb.d/02_create_staging.sql:ro
+      - ./sql/03_create_dimensions.sql:/docker-entrypoint-initdb.d/03_create_dimensions.sql:ro
+      - ./sql/04_create_facts.sql:/docker-entrypoint-initdb.d/04_create_facts.sql:ro
+      - ./sql/05_create_metadata.sql:/docker-entrypoint-initdb.d/05_create_metadata.sql:ro
+      - ./sql/06_create_indexes.sql:/docker-entrypoint-initdb.d/06_create_indexes.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-hotel_admin} -d ${DB_NAME:-hotel_dw}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ----------------------------------------------------------------------------
+  # Simulated Hotel REST API Feeds
+  # ----------------------------------------------------------------------------
+  hotel_api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: hotel_api_service
+    command: uvicorn api.main:app --host 0.0.0.0 --port 8000
+    ports:
+      - "8000:8000"
+    environment:
+      - DB_TYPE=postgres
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_USER=${DB_USER:-hotel_admin}
+      - DB_PASSWORD=${DB_PASSWORD:-hotel_secure_pwd_2026}
+      - DB_NAME=${DB_NAME:-hotel_dw}
+    volumes:
+      - ./data:/app/data
+      - ./reports:/app/reports
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  # ----------------------------------------------------------------------------
+  # Airflow Init (Runs Database Migrations and Sets Admin Credentials)
+  # ----------------------------------------------------------------------------
+  airflow_init:
+    image: apache/airflow:2.8.1-python3.11
+    container_name: hotel_airflow_init
+    entrypoint: [/bin/bash, -c]
+    command:
+      - |
+        airflow db init &&
+        airflow users create \
+          --username admin \
+          --firstname Hotel \
+          --lastname Admin \
+          --role Admin \
+          --email admin@hotelanalytics.local \
+          --password admin
+    environment:
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://${DB_USER:-hotel_admin}:${DB_PASSWORD:-hotel_secure_pwd_2026}@postgres:5432/${DB_NAME:-hotel_dw}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # ----------------------------------------------------------------------------
+  # Airflow Webserver
+  # ----------------------------------------------------------------------------
+  airflow_webserver:
+    image: apache/airflow:2.8.1-python3.11
+    container_name: hotel_airflow_webserver
+    restart: unless-stopped
+    command: webserver
+    ports:
+      - "8080:8080"
+    environment:
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://${DB_USER:-hotel_admin}:${DB_PASSWORD:-hotel_secure_pwd_2026}@postgres:5432/${DB_NAME:-hotel_dw}
+      - AIRFLOW__WEBSERVER__SECRET_KEY=hotel_batch_pipeline_secret_2026_key
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./src:/opt/airflow/src
+      - ./data:/opt/airflow/data
+      - ./reports:/opt/airflow/reports
+    depends_on:
+      postgres:
+        condition: service_healthy
+      airflow_init:
+        condition: service_completed_successfully
+
+  # ----------------------------------------------------------------------------
+  # Airflow Scheduler
+  # ----------------------------------------------------------------------------
+  airflow_scheduler:
+    image: apache/airflow:2.8.1-python3.11
+    container_name: hotel_airflow_scheduler
+    restart: unless-stopped
+    command: scheduler
+    environment:
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=postgresql+psycopg2://${DB_USER:-hotel_admin}:${DB_PASSWORD:-hotel_secure_pwd_2026}@postgres:5432/${DB_NAME:-hotel_dw}
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./src:/opt/airflow/src
+      - ./data:/opt/airflow/data
+      - ./reports:/opt/airflow/reports
+    depends_on:
+      postgres:
+        condition: service_healthy
+      airflow_init:
+        condition: service_completed_successfully
+
+volumes:
+  postgres_data:
