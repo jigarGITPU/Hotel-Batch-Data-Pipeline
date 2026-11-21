@@ -104,166 +104,185 @@ class WarehouseLoader:
     # Dimensions Loading & Upsert
     # --------------------------------------------------------------------------
     def upsert_guests(self, df_guests: pd.DataFrame, batch_id: str) -> int:
-        """Upsert unique guest dimension records."""
+        """Upsert unique guest dimension records using chunked executemany."""
         if df_guests.empty:
             return 0
 
         tbl = self.db.get_table_name("analytics_dw", "dim_guest")
-        loaded = 0
         now_iso = datetime.now(timezone.utc).isoformat()
+        records = []
 
-        # Iterate and upsert
-        with self.db.transaction() as conn:
-            for _, r in df_guests.iterrows():
-                g_id = str(r["guest_id"]).strip()
-                f_name = str(r.get("first_name", "")).strip()
-                l_name = str(r.get("last_name", "")).strip()
-                full_name = str(r.get("full_name") or f"{f_name} {l_name}").strip()
-                email = str(r.get("email", "")).strip()
-                phone = str(r.get("phone", "")).strip()
-                city = str(r.get("city", "Guwahati")).strip()
-                state = str(r.get("state", "Assam")).strip()
-                country = str(r.get("country", "India")).strip()
+        for _, r in df_guests.iterrows():
+            g_id = str(r["guest_id"]).strip()
+            f_name = str(r.get("first_name", "")).strip()
+            l_name = str(r.get("last_name", "")).strip()
+            full_name = str(r.get("full_name") or f"{f_name} {l_name}").strip()
+            email = str(r.get("email", "")).strip()
+            phone = str(r.get("phone", "")).strip()
+            city = str(r.get("city", "Guwahati")).strip()
+            state = str(r.get("state", "Assam")).strip()
+            country = str(r.get("country", "India")).strip()
 
-                if self.db.is_sqlite:
-                    sql = f"""
-                        INSERT INTO {tbl} (guest_id, first_name, last_name, full_name, email, phone, city, state, country, created_at, updated_at)
-                        VALUES (:guest_id, :first_name, :last_name, :full_name, :email, :phone, :city, :state, :country, :created_at, :updated_at)
-                        ON CONFLICT(guest_id) DO UPDATE SET
-                            first_name = excluded.first_name,
-                            last_name = excluded.last_name,
-                            full_name = excluded.full_name,
-                            email = excluded.email,
-                            phone = excluded.phone,
-                            city = excluded.city,
-                            state = excluded.state,
-                            updated_at = excluded.updated_at;
-                    """
-                else:
-                    sql = f"""
-                        INSERT INTO {tbl} (guest_id, first_name, last_name, full_name, email, phone, city, state, country, created_at, updated_at)
-                        VALUES (:guest_id, :first_name, :last_name, :full_name, :email, :phone, :city, :state, :country, :created_at, :updated_at)
-                        ON CONFLICT (guest_id) DO UPDATE SET
-                            first_name = EXCLUDED.first_name,
-                            last_name = EXCLUDED.last_name,
-                            full_name = EXCLUDED.full_name,
-                            email = EXCLUDED.email,
-                            phone = EXCLUDED.phone,
-                            city = EXCLUDED.city,
-                            state = EXCLUDED.state,
-                            updated_at = EXCLUDED.updated_at;
-                    """
-                conn.execute(text(sql), {
-                    "guest_id": g_id,
-                    "first_name": f_name,
-                    "last_name": l_name,
-                    "full_name": full_name,
-                    "email": email,
-                    "phone": phone,
-                    "city": city,
-                    "state": state,
-                    "country": country,
-                    "created_at": now_iso,
-                    "updated_at": now_iso
-                })
-                loaded += 1
+            records.append({
+                "guest_id": g_id,
+                "first_name": f_name,
+                "last_name": l_name,
+                "full_name": full_name,
+                "email": email,
+                "phone": phone,
+                "city": city,
+                "state": state,
+                "country": country,
+                "created_at": now_iso,
+                "updated_at": now_iso
+            })
+
+        if self.db.is_sqlite:
+            sql = f"""
+                INSERT INTO {tbl} (guest_id, first_name, last_name, full_name, email, phone, city, state, country, created_at, updated_at)
+                VALUES (:guest_id, :first_name, :last_name, :full_name, :email, :phone, :city, :state, :country, :created_at, :updated_at)
+                ON CONFLICT(guest_id) DO UPDATE SET
+                    first_name = excluded.first_name,
+                    last_name = excluded.last_name,
+                    full_name = excluded.full_name,
+                    email = excluded.email,
+                    phone = excluded.phone,
+                    city = excluded.city,
+                    state = excluded.state,
+                    updated_at = excluded.updated_at;
+            """
+        else:
+            sql = f"""
+                INSERT INTO {tbl} (guest_id, first_name, last_name, full_name, email, phone, city, state, country, created_at, updated_at)
+                VALUES (:guest_id, :first_name, :last_name, :full_name, :email, :phone, :city, :state, :country, :created_at, :updated_at)
+                ON CONFLICT (guest_id) DO UPDATE SET
+                    first_name = EXCLUDED.first_name,
+                    last_name = EXCLUDED.last_name,
+                    full_name = EXCLUDED.full_name,
+                    email = EXCLUDED.email,
+                    phone = EXCLUDED.phone,
+                    city = EXCLUDED.city,
+                    state = EXCLUDED.state,
+                    updated_at = EXCLUDED.updated_at;
+            """
+
+        chunksize = 2000
+        stmt = text(sql)
+        for i in range(0, len(records), chunksize):
+            chunk = records[i:i + chunksize]
+            with self.db.transaction() as conn:
+                conn.execute(stmt, chunk)
 
         self._refresh_dimension_caches()
-        return loaded
+        return len(records)
 
     def upsert_rooms(self, df_rooms: pd.DataFrame) -> int:
-        """Upsert rooms dimension records."""
+        """Upsert rooms dimension records using chunked executemany."""
         if df_rooms.empty:
             return 0
 
         tbl = self.db.get_table_name("analytics_dw", "dim_room")
-        loaded = 0
         now_iso = datetime.now(timezone.utc).isoformat()
+        records = []
 
-        with self.db.transaction() as conn:
-            for _, r in df_rooms.iterrows():
-                r_id = str(r["room_id"]).strip()
-                h_id = str(r["hotel_id"]).strip()
-                c_type = str(r.get("canonical_room_type", "Standard Double")).strip()
-                cap = int(r.get("standard_capacity", 2))
-                rate = float(r.get("base_rate_inr", 3500.0))
+        for _, r in df_rooms.iterrows():
+            r_id = str(r["room_id"]).strip()
+            h_id = str(r["hotel_id"]).strip()
+            c_type = str(r.get("canonical_room_type", "Standard Double")).strip()
+            cap = int(r.get("standard_capacity", 2))
+            rate = float(r.get("base_rate_inr", 3500.0))
 
-                if self.db.is_sqlite:
-                    sql = f"""
-                        INSERT INTO {tbl} (room_id, hotel_id, canonical_room_type, standard_capacity, base_rate_inr, created_at, updated_at)
-                        VALUES (:room_id, :hotel_id, :canonical_room_type, :standard_capacity, :base_rate_inr, :created_at, :updated_at)
-                        ON CONFLICT(room_id) DO UPDATE SET
-                            canonical_room_type = excluded.canonical_room_type,
-                            standard_capacity = excluded.standard_capacity,
-                            base_rate_inr = excluded.base_rate_inr,
-                            updated_at = excluded.updated_at;
-                    """
-                else:
-                    sql = f"""
-                        INSERT INTO {tbl} (room_id, hotel_id, canonical_room_type, standard_capacity, base_rate_inr, created_at, updated_at)
-                        VALUES (:room_id, :hotel_id, :canonical_room_type, :standard_capacity, :base_rate_inr, :created_at, :updated_at)
-                        ON CONFLICT (room_id) DO UPDATE SET
-                            canonical_room_type = EXCLUDED.canonical_room_type,
-                            standard_capacity = EXCLUDED.standard_capacity,
-                            base_rate_inr = EXCLUDED.base_rate_inr,
-                            updated_at = EXCLUDED.updated_at;
-                    """
-                conn.execute(text(sql), {
-                    "room_id": r_id,
-                    "hotel_id": h_id,
-                    "canonical_room_type": c_type,
-                    "standard_capacity": cap,
-                    "base_rate_inr": rate,
-                    "created_at": now_iso,
-                    "updated_at": now_iso
-                })
-                loaded += 1
+            records.append({
+                "room_id": r_id,
+                "hotel_id": h_id,
+                "canonical_room_type": c_type,
+                "standard_capacity": cap,
+                "base_rate_inr": rate,
+                "created_at": now_iso,
+                "updated_at": now_iso
+            })
+
+        if self.db.is_sqlite:
+            sql = f"""
+                INSERT INTO {tbl} (room_id, hotel_id, canonical_room_type, standard_capacity, base_rate_inr, created_at, updated_at)
+                VALUES (:room_id, :hotel_id, :canonical_room_type, :standard_capacity, :base_rate_inr, :created_at, :updated_at)
+                ON CONFLICT(room_id) DO UPDATE SET
+                    canonical_room_type = excluded.canonical_room_type,
+                    standard_capacity = excluded.standard_capacity,
+                    base_rate_inr = excluded.base_rate_inr,
+                    updated_at = excluded.updated_at;
+            """
+        else:
+            sql = f"""
+                INSERT INTO {tbl} (room_id, hotel_id, canonical_room_type, standard_capacity, base_rate_inr, created_at, updated_at)
+                VALUES (:room_id, :hotel_id, :canonical_room_type, :standard_capacity, :base_rate_inr, :created_at, :updated_at)
+                ON CONFLICT (room_id) DO UPDATE SET
+                    canonical_room_type = EXCLUDED.canonical_room_type,
+                    standard_capacity = EXCLUDED.standard_capacity,
+                    base_rate_inr = EXCLUDED.base_rate_inr,
+                    updated_at = EXCLUDED.updated_at;
+            """
+
+        stmt = text(sql)
+        chunksize = 2000
+        for i in range(0, len(records), chunksize):
+            chunk = records[i:i + chunksize]
+            with self.db.transaction() as conn:
+                conn.execute(stmt, chunk)
 
         self._refresh_dimension_caches()
-        return loaded
+        return len(records)
 
     # --------------------------------------------------------------------------
     # Facts Loading & Idempotent UPSERT
     # --------------------------------------------------------------------------
     def upsert_fact_bookings(self, df_bookings: pd.DataFrame, batch_id: str) -> int:
         """
-        Idempotent UPSERT into analytics_dw.fact_bookings on unique business key booking_line_id.
+        Idempotent UPSERT into analytics_dw.fact_bookings on unique business key booking_line_id
+        using high-performance chunked executemany.
         """
         if df_bookings.empty:
             return 0
 
         self._refresh_dimension_caches()
 
-        # Batch insert any rooms that are not in room_cache
-        needed_rooms = []
-        for _, r in df_bookings.iterrows():
-            r_id = str(r.get("room_id", "")).strip()
-            if r_id and r_id not in self.room_cache:
-                needed_rooms.append({
-                    "room_id": r_id,
-                    "hotel_id": str(r.get("hotel_id", "")).strip(),
-                    "canonical_room_type": str(r.get("canonical_room_type", "Standard Double")).strip(),
-                    "standard_capacity": int(r.get("standard_capacity", 2)),
-                    "base_rate_inr": float(r.get("room_rate_inr", 3500.0) or 3500.0)
-                })
-        if needed_rooms:
-            df_needed_rms = pd.DataFrame(needed_rooms).drop_duplicates(subset=["room_id"])
-            self.upsert_rooms(df_needed_rms)
+        # Vectorized check for un-cached rooms
+        booking_room_ids = set(df_bookings["room_id"].dropna().astype(str).str.strip())
+        missing_room_ids = booking_room_ids - set(self.room_cache.keys())
+        if missing_room_ids:
+            df_missing = df_bookings[df_bookings["room_id"].isin(missing_room_ids)][
+                ["room_id", "hotel_id", "canonical_room_type", "standard_capacity", "room_rate_inr"]
+            ].drop_duplicates(subset=["room_id"])
+            df_missing_rooms = pd.DataFrame({
+                "room_id": df_missing["room_id"],
+                "hotel_id": df_missing["hotel_id"],
+                "canonical_room_type": df_missing["canonical_room_type"],
+                "standard_capacity": df_missing["standard_capacity"],
+                "base_rate_inr": df_missing["room_rate_inr"].fillna(3500.0)
+            })
+            self.upsert_rooms(df_missing_rooms)
             self._refresh_dimension_caches()
 
         tbl = self.db.get_table_name("analytics_dw", "fact_bookings")
         now_iso = datetime.now(timezone.utc).isoformat()
-        records_to_upsert = []
 
-        for _, r in df_bookings.iterrows():
-            b_line_id = str(r.get("booking_line_id") or f"{r.get('booking_id')}-01").strip()
+        # High-performance dictionary comprehension
+        records_to_upsert = []
+        hotel_cache = self.hotel_cache
+        guest_cache = self.guest_cache
+        room_cache = self.room_cache
+
+        records_dict = df_bookings.to_dict(orient="records")
+        for r in records_dict:
+            b_id = str(r.get("booking_id", ""))
+            b_line_id = str(r.get("booking_line_id") or f"{b_id}-01").strip()
             h_id = str(r.get("hotel_id", "")).strip()
             g_id = str(r.get("canonical_guest_id") or r.get("guest_id", "")).strip()
             r_id = str(r.get("room_id", "")).strip()
 
-            h_key = self.hotel_cache.get(h_id, 1)
-            g_key = self.guest_cache.get(g_id, 1)
-            r_key = self.room_cache.get(r_id, 1)
+            h_key = hotel_cache.get(h_id, 1)
+            g_key = guest_cache.get(g_id, 1)
+            r_key = room_cache.get(r_id, 1)
 
             b_raw = r.get("booking_date_key")
             ci_raw = r.get("check_in_date_key")
@@ -274,7 +293,7 @@ class WarehouseLoader:
             co_date_key = int(co_raw) if co_raw is not None and not pd.isna(co_raw) else 20260102
 
             records_to_upsert.append({
-                "booking_id": str(r.get("booking_id")),
+                "booking_id": b_id,
                 "booking_line_id": b_line_id,
                 "hotel_key": h_key,
                 "guest_key": g_key,
@@ -296,256 +315,270 @@ class WarehouseLoader:
                 "dw_loaded_at": now_iso
             })
 
-        # Perform chunked UPSERT
-        chunksize = 2000
-        total_upserted = 0
+        if self.db.is_sqlite:
+            sql = f"""
+                INSERT INTO {tbl} (
+                    booking_id, booking_line_id, hotel_key, guest_key, room_key,
+                    booking_date_key, check_in_date_key, check_out_date_key,
+                    booking_status, original_rate, original_currency, exchange_rate_used,
+                    room_rate_inr, total_amount_inr, number_of_guests, lead_time_days,
+                    length_of_stay_days, source_updated_at, dw_batch_id, dw_loaded_at
+                ) VALUES (
+                    :booking_id, :booking_line_id, :hotel_key, :guest_key, :room_key,
+                    :booking_date_key, :check_in_date_key, :check_out_date_key,
+                    :booking_status, :original_rate, :original_currency, :exchange_rate_used,
+                    :room_rate_inr, :total_amount_inr, :number_of_guests, :lead_time_days,
+                    :length_of_stay_days, :source_updated_at, :dw_batch_id, :dw_loaded_at
+                )
+                ON CONFLICT(booking_line_id) DO UPDATE SET
+                    hotel_key = excluded.hotel_key,
+                    guest_key = excluded.guest_key,
+                    room_key = excluded.room_key,
+                    booking_date_key = excluded.booking_date_key,
+                    check_in_date_key = excluded.check_in_date_key,
+                    check_out_date_key = excluded.check_out_date_key,
+                    booking_status = excluded.booking_status,
+                    original_rate = excluded.original_rate,
+                    original_currency = excluded.original_currency,
+                    exchange_rate_used = excluded.exchange_rate_used,
+                    room_rate_inr = excluded.room_rate_inr,
+                    total_amount_inr = excluded.total_amount_inr,
+                    number_of_guests = excluded.number_of_guests,
+                    lead_time_days = excluded.lead_time_days,
+                    length_of_stay_days = excluded.length_of_stay_days,
+                    source_updated_at = excluded.source_updated_at,
+                    dw_batch_id = excluded.dw_batch_id,
+                    dw_loaded_at = excluded.dw_loaded_at;
+            """
+        else:
+            sql = f"""
+                INSERT INTO {tbl} (
+                    booking_id, booking_line_id, hotel_key, guest_key, room_key,
+                    booking_date_key, check_in_date_key, check_out_date_key,
+                    booking_status, original_rate, original_currency, exchange_rate_used,
+                    room_rate_inr, total_amount_inr, number_of_guests, lead_time_days,
+                    length_of_stay_days, source_updated_at, dw_batch_id, dw_loaded_at
+                ) VALUES (
+                    :booking_id, :booking_line_id, :hotel_key, :guest_key, :room_key,
+                    :booking_date_key, :check_in_date_key, :check_out_date_key,
+                    :booking_status, :original_rate, :original_currency, :exchange_rate_used,
+                    :room_rate_inr, :total_amount_inr, :number_of_guests, :lead_time_days,
+                    :length_of_stay_days, :source_updated_at, :dw_batch_id, :dw_loaded_at
+                )
+                ON CONFLICT (booking_line_id) DO UPDATE SET
+                    hotel_key = EXCLUDED.hotel_key,
+                    guest_key = EXCLUDED.guest_key,
+                    room_key = EXCLUDED.room_key,
+                    booking_date_key = EXCLUDED.booking_date_key,
+                    check_in_date_key = EXCLUDED.check_in_date_key,
+                    check_out_date_key = EXCLUDED.check_out_date_key,
+                    booking_status = EXCLUDED.booking_status,
+                    original_rate = EXCLUDED.original_rate,
+                    original_currency = EXCLUDED.original_currency,
+                    exchange_rate_used = EXCLUDED.exchange_rate_used,
+                    room_rate_inr = EXCLUDED.room_rate_inr,
+                    total_amount_inr = EXCLUDED.total_amount_inr,
+                    number_of_guests = EXCLUDED.number_of_guests,
+                    lead_time_days = EXCLUDED.lead_time_days,
+                    length_of_stay_days = EXCLUDED.length_of_stay_days,
+                    source_updated_at = EXCLUDED.source_updated_at,
+                    dw_batch_id = EXCLUDED.dw_batch_id,
+                    dw_loaded_at = EXCLUDED.dw_loaded_at;
+            """
 
+        chunksize = 2000
+        stmt = text(sql)
         for i in range(0, len(records_to_upsert), chunksize):
             chunk = records_to_upsert[i:i + chunksize]
             with self.db.transaction() as conn:
-                for item in chunk:
-                    if self.db.is_sqlite:
-                        sql = f"""
-                            INSERT INTO {tbl} (
-                                booking_id, booking_line_id, hotel_key, guest_key, room_key,
-                                booking_date_key, check_in_date_key, check_out_date_key,
-                                booking_status, original_rate, original_currency, exchange_rate_used,
-                                room_rate_inr, total_amount_inr, number_of_guests, lead_time_days,
-                                length_of_stay_days, source_updated_at, dw_batch_id, dw_loaded_at
-                            ) VALUES (
-                                :booking_id, :booking_line_id, :hotel_key, :guest_key, :room_key,
-                                :booking_date_key, :check_in_date_key, :check_out_date_key,
-                                :booking_status, :original_rate, :original_currency, :exchange_rate_used,
-                                :room_rate_inr, :total_amount_inr, :number_of_guests, :lead_time_days,
-                                :length_of_stay_days, :source_updated_at, :dw_batch_id, :dw_loaded_at
-                            )
-                            ON CONFLICT(booking_line_id) DO UPDATE SET
-                                hotel_key = excluded.hotel_key,
-                                guest_key = excluded.guest_key,
-                                room_key = excluded.room_key,
-                                booking_date_key = excluded.booking_date_key,
-                                check_in_date_key = excluded.check_in_date_key,
-                                check_out_date_key = excluded.check_out_date_key,
-                                booking_status = excluded.booking_status,
-                                original_rate = excluded.original_rate,
-                                original_currency = excluded.original_currency,
-                                exchange_rate_used = excluded.exchange_rate_used,
-                                room_rate_inr = excluded.room_rate_inr,
-                                total_amount_inr = excluded.total_amount_inr,
-                                number_of_guests = excluded.number_of_guests,
-                                lead_time_days = excluded.lead_time_days,
-                                length_of_stay_days = excluded.length_of_stay_days,
-                                source_updated_at = excluded.source_updated_at,
-                                dw_batch_id = excluded.dw_batch_id,
-                                dw_loaded_at = excluded.dw_loaded_at;
-                        """
-                    else:
-                        sql = f"""
-                            INSERT INTO {tbl} (
-                                booking_id, booking_line_id, hotel_key, guest_key, room_key,
-                                booking_date_key, check_in_date_key, check_out_date_key,
-                                booking_status, original_rate, original_currency, exchange_rate_used,
-                                room_rate_inr, total_amount_inr, number_of_guests, lead_time_days,
-                                length_of_stay_days, source_updated_at, dw_batch_id, dw_loaded_at
-                            ) VALUES (
-                                :booking_id, :booking_line_id, :hotel_key, :guest_key, :room_key,
-                                :booking_date_key, :check_in_date_key, :check_out_date_key,
-                                :booking_status, :original_rate, :original_currency, :exchange_rate_used,
-                                :room_rate_inr, :total_amount_inr, :number_of_guests, :lead_time_days,
-                                :length_of_stay_days, :source_updated_at, :dw_batch_id, :dw_loaded_at
-                            )
-                            ON CONFLICT (booking_line_id) DO UPDATE SET
-                                hotel_key = EXCLUDED.hotel_key,
-                                guest_key = EXCLUDED.guest_key,
-                                room_key = EXCLUDED.room_key,
-                                booking_date_key = EXCLUDED.booking_date_key,
-                                check_in_date_key = EXCLUDED.check_in_date_key,
-                                check_out_date_key = EXCLUDED.check_out_date_key,
-                                booking_status = EXCLUDED.booking_status,
-                                original_rate = EXCLUDED.original_rate,
-                                original_currency = EXCLUDED.original_currency,
-                                exchange_rate_used = EXCLUDED.exchange_rate_used,
-                                room_rate_inr = EXCLUDED.room_rate_inr,
-                                total_amount_inr = EXCLUDED.total_amount_inr,
-                                number_of_guests = EXCLUDED.number_of_guests,
-                                lead_time_days = EXCLUDED.lead_time_days,
-                                length_of_stay_days = EXCLUDED.length_of_stay_days,
-                                source_updated_at = EXCLUDED.source_updated_at,
-                                dw_batch_id = EXCLUDED.dw_batch_id,
-                                dw_loaded_at = EXCLUDED.dw_loaded_at;
-                        """
-                    conn.execute(text(sql), item)
-                    total_upserted += 1
+                conn.execute(stmt, chunk)
 
-        logger.info(f"Loaded {total_upserted} fact_bookings records via idempotent UPSERT (Batch: {batch_id})")
-        return total_upserted
+        logger.info(f"Loaded {len(records_to_upsert)} fact_bookings records via idempotent UPSERT (Batch: {batch_id})")
+        return len(records_to_upsert)
 
     def upsert_fact_stays(self, df_stays: pd.DataFrame, batch_id: str) -> int:
-        """Idempotent UPSERT into analytics_dw.fact_stays."""
+        """Idempotent UPSERT into analytics_dw.fact_stays using chunked executemany."""
         if df_stays.empty:
             return 0
 
         self._refresh_dimension_caches()
         tbl = self.db.get_table_name("analytics_dw", "fact_stays")
         now_iso = datetime.now(timezone.utc).isoformat()
-        total = 0
 
-        with self.db.transaction() as conn:
-            for _, r in df_stays.iterrows():
-                s_id = str(r["stay_id"]).strip()
-                b_id = str(r.get("booking_id", "")).strip()
-                h_id = str(r.get("hotel_id", "")).strip()
-                g_id = str(r.get("guest_id", "")).strip()
-                r_id = str(r.get("room_id", "")).strip()
+        records_to_upsert = []
+        hotel_cache = self.hotel_cache
+        guest_cache = self.guest_cache
+        room_cache = self.room_cache
 
-                h_key = self.hotel_cache.get(h_id, 1)
-                g_key = self.guest_cache.get(g_id, 1)
-                r_key = self.room_cache.get(r_id, 1)
+        records_dict = df_stays.to_dict(orient="records")
+        for r in records_dict:
+            s_id = str(r["stay_id"]).strip()
+            b_id = str(r.get("booking_id", "")).strip()
+            h_id = str(r.get("hotel_id", "")).strip()
+            g_id = str(r.get("guest_id", "")).strip()
+            r_id = str(r.get("room_id", "")).strip()
 
-                ci_raw = r.get("check_in_date_key")
-                co_raw = r.get("check_out_date_key")
-                ci_key = int(ci_raw) if ci_raw is not None and not pd.isna(ci_raw) else 20260101
-                co_key = int(co_raw) if co_raw is not None and not pd.isna(co_raw) else None
+            h_key = hotel_cache.get(h_id, 1)
+            g_key = guest_cache.get(g_id, 1)
+            r_key = room_cache.get(r_id, 1)
 
-                dur_raw = r.get("actual_duration_hours")
-                dur = float(dur_raw) if dur_raw is not None and not pd.isna(dur_raw) else 0.0
+            ci_raw = r.get("check_in_date_key")
+            co_raw = r.get("check_out_date_key")
+            ci_key = int(ci_raw) if ci_raw is not None and not pd.isna(ci_raw) else 20260101
+            co_key = int(co_raw) if co_raw is not None and not pd.isna(co_raw) else None
 
-                item = {
-                    "stay_id": s_id,
-                    "booking_id": b_id,
-                    "hotel_key": h_key,
-                    "guest_key": g_key,
-                    "room_key": r_key,
-                    "check_in_date_key": ci_key,
-                    "check_out_date_key": co_key,
-                    "stay_status": str(r.get("stay_status", "COMPLETED")),
-                    "actual_check_in": str(r.get("actual_check_in") or ""),
-                    "actual_check_out": str(r.get("actual_check_out") or ""),
-                    "actual_duration_hours": dur,
-                    "dw_batch_id": batch_id,
-                    "dw_loaded_at": now_iso
-                }
+            dur_raw = r.get("actual_duration_hours")
+            dur = float(dur_raw) if dur_raw is not None and not pd.isna(dur_raw) else 0.0
 
-                if self.db.is_sqlite:
-                    sql = f"""
-                        INSERT INTO {tbl} (
-                            stay_id, booking_id, hotel_key, guest_key, room_key,
-                            check_in_date_key, check_out_date_key, stay_status,
-                            actual_check_in, actual_check_out, actual_duration_hours,
-                            dw_batch_id, dw_loaded_at
-                        ) VALUES (
-                            :stay_id, :booking_id, :hotel_key, :guest_key, :room_key,
-                            :check_in_date_key, :check_out_date_key, :stay_status,
-                            :actual_check_in, :actual_check_out, :actual_duration_hours,
-                            :dw_batch_id, :dw_loaded_at
-                        )
-                        ON CONFLICT(stay_id) DO UPDATE SET
-                            stay_status = excluded.stay_status,
-                            actual_check_in = excluded.actual_check_in,
-                            actual_check_out = excluded.actual_check_out,
-                            actual_duration_hours = excluded.actual_duration_hours,
-                            dw_batch_id = excluded.dw_batch_id,
-                            dw_loaded_at = excluded.dw_loaded_at;
-                    """
-                else:
-                    sql = f"""
-                        INSERT INTO {tbl} (
-                            stay_id, booking_id, hotel_key, guest_key, room_key,
-                            check_in_date_key, check_out_date_key, stay_status,
-                            actual_check_in, actual_check_out, actual_duration_hours,
-                            dw_batch_id, dw_loaded_at
-                        ) VALUES (
-                            :stay_id, :booking_id, :hotel_key, :guest_key, :room_key,
-                            :check_in_date_key, :check_out_date_key, :stay_status,
-                            :actual_check_in, :actual_check_out, :actual_duration_hours,
-                            :dw_batch_id, :dw_loaded_at
-                        )
-                        ON CONFLICT (stay_id) DO UPDATE SET
-                            stay_status = EXCLUDED.stay_status,
-                            actual_check_in = EXCLUDED.actual_check_in,
-                            actual_check_out = EXCLUDED.actual_check_out,
-                            actual_duration_hours = EXCLUDED.actual_duration_hours,
-                            dw_batch_id = EXCLUDED.dw_batch_id,
-                            dw_loaded_at = EXCLUDED.dw_loaded_at;
-                    """
-                conn.execute(text(sql), item)
-                total += 1
+            records_to_upsert.append({
+                "stay_id": s_id,
+                "booking_id": b_id,
+                "hotel_key": h_key,
+                "guest_key": g_key,
+                "room_key": r_key,
+                "check_in_date_key": ci_key,
+                "check_out_date_key": co_key,
+                "stay_status": str(r.get("stay_status", "COMPLETED")),
+                "actual_check_in": str(r.get("actual_check_in") or ""),
+                "actual_check_out": str(r.get("actual_check_out") or ""),
+                "actual_duration_hours": dur,
+                "dw_batch_id": batch_id,
+                "dw_loaded_at": now_iso
+            })
 
-        logger.info(f"Loaded {total} fact_stays records via idempotent UPSERT (Batch: {batch_id})")
-        return total
+        if self.db.is_sqlite:
+            sql = f"""
+                INSERT INTO {tbl} (
+                    stay_id, booking_id, hotel_key, guest_key, room_key,
+                    check_in_date_key, check_out_date_key, stay_status,
+                    actual_check_in, actual_check_out, actual_duration_hours,
+                    dw_batch_id, dw_loaded_at
+                ) VALUES (
+                    :stay_id, :booking_id, :hotel_key, :guest_key, :room_key,
+                    :check_in_date_key, :check_out_date_key, :stay_status,
+                    :actual_check_in, :actual_check_out, :actual_duration_hours,
+                    :dw_batch_id, :dw_loaded_at
+                )
+                ON CONFLICT(stay_id) DO UPDATE SET
+                    stay_status = excluded.stay_status,
+                    actual_check_in = excluded.actual_check_in,
+                    actual_check_out = excluded.actual_check_out,
+                    actual_duration_hours = excluded.actual_duration_hours,
+                    dw_batch_id = excluded.dw_batch_id,
+                    dw_loaded_at = excluded.dw_loaded_at;
+            """
+        else:
+            sql = f"""
+                INSERT INTO {tbl} (
+                    stay_id, booking_id, hotel_key, guest_key, room_key,
+                    check_in_date_key, check_out_date_key, stay_status,
+                    actual_check_in, actual_check_out, actual_duration_hours,
+                    dw_batch_id, dw_loaded_at
+                ) VALUES (
+                    :stay_id, :booking_id, :hotel_key, :guest_key, :room_key,
+                    :check_in_date_key, :check_out_date_key, :stay_status,
+                    :actual_check_in, :actual_check_out, :actual_duration_hours,
+                    :dw_batch_id, :dw_loaded_at
+                )
+                ON CONFLICT (stay_id) DO UPDATE SET
+                    stay_status = EXCLUDED.stay_status,
+                    actual_check_in = EXCLUDED.actual_check_in,
+                    actual_check_out = EXCLUDED.actual_check_out,
+                    actual_duration_hours = EXCLUDED.actual_duration_hours,
+                    dw_batch_id = EXCLUDED.dw_batch_id,
+                    dw_loaded_at = EXCLUDED.dw_loaded_at;
+            """
+
+        chunksize = 2000
+        stmt = text(sql)
+        for i in range(0, len(records_to_upsert), chunksize):
+            chunk = records_to_upsert[i:i + chunksize]
+            with self.db.transaction() as conn:
+                conn.execute(stmt, chunk)
+
+        logger.info(f"Loaded {len(records_to_upsert)} fact_stays records via idempotent UPSERT (Batch: {batch_id})")
+        return len(records_to_upsert)
 
     def upsert_fact_reviews(self, df_reviews: pd.DataFrame, batch_id: str) -> int:
-        """Idempotent UPSERT into analytics_dw.fact_reviews."""
+        """Idempotent UPSERT into analytics_dw.fact_reviews using chunked executemany."""
         if df_reviews.empty:
             return 0
 
         self._refresh_dimension_caches()
         tbl = self.db.get_table_name("analytics_dw", "fact_reviews")
         now_iso = datetime.now(timezone.utc).isoformat()
-        total = 0
 
-        with self.db.transaction() as conn:
-            for _, r in df_reviews.iterrows():
-                rev_id = str(r["review_id"]).strip()
-                b_id = str(r.get("booking_id", "")).strip()
-                h_id = str(r.get("hotel_id", "")).strip()
-                g_id = str(r.get("guest_id", "")).strip()
+        records_to_upsert = []
+        hotel_cache = self.hotel_cache
+        guest_cache = self.guest_cache
 
-                h_key = self.hotel_cache.get(h_id, 1)
-                g_key = self.guest_cache.get(g_id, 1)
-                rev_date_key = int(r.get("review_date_key") or 20260101)
+        records_dict = df_reviews.to_dict(orient="records")
+        for r in records_dict:
+            rev_id = str(r["review_id"]).strip()
+            b_id = str(r.get("booking_id", "")).strip()
+            h_id = str(r.get("hotel_id", "")).strip()
+            g_id = str(r.get("guest_id", "")).strip()
 
-                item = {
-                    "review_id": rev_id,
-                    "booking_id": b_id,
-                    "hotel_key": h_key,
-                    "guest_key": g_key,
-                    "review_date_key": rev_date_key,
-                    "rating": int(r.get("rating", 5)),
-                    "review_text": str(r.get("review_text", "")),
-                    "sentiment_category": str(r.get("sentiment_category", "NEUTRAL")),
-                    "dw_batch_id": batch_id,
-                    "dw_loaded_at": now_iso
-                }
+            h_key = hotel_cache.get(h_id, 1)
+            g_key = guest_cache.get(g_id, 1)
+            rev_date_key = int(r.get("review_date_key") or 20260101)
 
-                if self.db.is_sqlite:
-                    sql = f"""
-                        INSERT INTO {tbl} (
-                            review_id, booking_id, hotel_key, guest_key,
-                            review_date_key, rating, review_text, sentiment_category,
-                            dw_batch_id, dw_loaded_at
-                        ) VALUES (
-                            :review_id, :booking_id, :hotel_key, :guest_key,
-                            :review_date_key, :rating, :review_text, :sentiment_category,
-                            :dw_batch_id, :dw_loaded_at
-                        )
-                        ON CONFLICT(review_id) DO UPDATE SET
-                            rating = excluded.rating,
-                            review_text = excluded.review_text,
-                            sentiment_category = excluded.sentiment_category,
-                            dw_batch_id = excluded.dw_batch_id,
-                            dw_loaded_at = excluded.dw_loaded_at;
-                    """
-                else:
-                    sql = f"""
-                        INSERT INTO {tbl} (
-                            review_id, booking_id, hotel_key, guest_key,
-                            review_date_key, rating, review_text, sentiment_category,
-                            dw_batch_id, dw_loaded_at
-                        ) VALUES (
-                            :review_id, :booking_id, :hotel_key, :guest_key,
-                            :review_date_key, :rating, :review_text, :sentiment_category,
-                            :dw_batch_id, :dw_loaded_at
-                        )
-                        ON CONFLICT (review_id) DO UPDATE SET
-                            rating = EXCLUDED.rating,
-                            review_text = EXCLUDED.review_text,
-                            sentiment_category = EXCLUDED.sentiment_category,
-                            dw_batch_id = EXCLUDED.dw_batch_id,
-                            dw_loaded_at = EXCLUDED.dw_loaded_at;
-                    """
-                conn.execute(text(sql), item)
-                total += 1
+            records_to_upsert.append({
+                "review_id": rev_id,
+                "booking_id": b_id,
+                "hotel_key": h_key,
+                "guest_key": g_key,
+                "review_date_key": rev_date_key,
+                "rating": int(r.get("rating", 5)),
+                "review_text": str(r.get("review_text", "")),
+                "sentiment_category": str(r.get("sentiment_category", "NEUTRAL")),
+                "dw_batch_id": batch_id,
+                "dw_loaded_at": now_iso
+            })
 
-        logger.info(f"Loaded {total} fact_reviews records via idempotent UPSERT (Batch: {batch_id})")
-        return total
+        if self.db.is_sqlite:
+            sql = f"""
+                INSERT INTO {tbl} (
+                    review_id, booking_id, hotel_key, guest_key,
+                    review_date_key, rating, review_text, sentiment_category,
+                    dw_batch_id, dw_loaded_at
+                ) VALUES (
+                    :review_id, :booking_id, :hotel_key, :guest_key,
+                    :review_date_key, :rating, :review_text, :sentiment_category,
+                    :dw_batch_id, :dw_loaded_at
+                )
+                ON CONFLICT(review_id) DO UPDATE SET
+                    rating = excluded.rating,
+                    review_text = excluded.review_text,
+                    sentiment_category = excluded.sentiment_category,
+                    dw_batch_id = excluded.dw_batch_id,
+                    dw_loaded_at = excluded.dw_loaded_at;
+            """
+        else:
+            sql = f"""
+                INSERT INTO {tbl} (
+                    review_id, booking_id, hotel_key, guest_key,
+                    review_date_key, rating, review_text, sentiment_category,
+                    dw_batch_id, dw_loaded_at
+                ) VALUES (
+                    :review_id, :booking_id, :hotel_key, :guest_key,
+                    :review_date_key, :rating, :review_text, :sentiment_category,
+                    :dw_batch_id, :dw_loaded_at
+                )
+                ON CONFLICT (review_id) DO UPDATE SET
+                    rating = EXCLUDED.rating,
+                    review_text = EXCLUDED.review_text,
+                    sentiment_category = EXCLUDED.sentiment_category,
+                    dw_batch_id = EXCLUDED.dw_batch_id,
+                    dw_loaded_at = EXCLUDED.dw_loaded_at;
+            """
+
+        chunksize = 2000
+        stmt = text(sql)
+        for i in range(0, len(records_to_upsert), chunksize):
+            chunk = records_to_upsert[i:i + chunksize]
+            with self.db.transaction() as conn:
+                conn.execute(stmt, chunk)
+
+        logger.info(f"Loaded {len(records_to_upsert)} fact_reviews records via idempotent UPSERT (Batch: {batch_id})")
+        return len(records_to_upsert)
